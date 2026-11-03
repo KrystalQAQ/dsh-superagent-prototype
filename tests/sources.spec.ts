@@ -779,6 +779,13 @@ describe('github source', () => {
       const off = await start({}, { enabled: false, config: {} })
       await vi.waitFor(() => expect(off.value.health.github).toMatchObject({ state: 'paused', code: 'sourceOff' }))
       await off.stop()
+      // A Source that names no repository waits instead of polling: no round reaches GitHub.
+      const idle = vi.spyOn(Commands.prototype, 'run')
+      const githubless = await start({ deployment: testDeployment({ repository: undefined, github: undefined }) }, { enabled: true, config: {} })
+      await vi.waitFor(() => expect(githubless.value.health.github).toMatchObject({ state: 'paused', code: 'githubRepositoryUnset' }))
+      expect(idle).not.toHaveBeenCalled()
+      await githubless.stop()
+      idle.mockRestore()
       // Rounds fail, succeed, fail, fail: only the last two in a row make the error. A round reads through a Commands of its own.
       const outcomes = [false, true, false, false]
       let round = 0

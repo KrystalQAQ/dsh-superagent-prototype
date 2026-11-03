@@ -5,6 +5,7 @@ import { CliError } from '../infra/commands.ts'
 import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
+import { githubSetup } from '../deployment.ts'
 import { githubAddress, githubPage } from './github-trigger.ts'
 
 const CommentSchema = z.looseObject({
@@ -17,7 +18,10 @@ const missing = (error: unknown): boolean => error instanceof CliError && (error
 /** Posts a comment or review-thread reply with an embedded HTML marker so retries do not create duplicate comments. */
 export async function sendGithub(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const { commands } = host
-  const { repository, github } = commands.deployment
+  const github = githubSetup(commands.deployment)
+  // Only a deployment with the GitHub Source can have queued a reply addressed to a GitHub thread.
+  if (!github) throw new Error('The GitHub Source names no repository')
+  const { repository } = github
   const number = Number(message.channel.address.number)
   if (!number) throw new Error('Missing GitHub reply target')
   try {
@@ -32,7 +36,7 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
     }
     const path = rootId === undefined ? `issues/${number}/comments` : `pulls/${number}/comments`
     const marker = `<!-- dsh-superagent:${message.id} -->`
-    const mine = (comment: z.infer<typeof CommentSchema>) => sameName(comment.user?.login ?? '', github.login)
+    const mine = (comment: z.infer<typeof CommentSchema>) => sameName(comment.user?.login ?? '', github.github.login)
       && (rootId === undefined || comment.in_reply_to_id === rootId) && (comment.body ?? '').includes(marker)
     if ((await commands.pages(CommentSchema, path)).some(mine)) return 'sent'
     const target = rootId === undefined ? path : `${path}/${rootId}/replies`

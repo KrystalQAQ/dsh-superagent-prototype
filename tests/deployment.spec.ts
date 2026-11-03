@@ -65,11 +65,21 @@ describe('setup', () => {
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
     expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
   })
+  it('resolves a deployment whose GitHub Source names no repository without probing any CLI', async () => {
+    const base = machine()
+    const spy = vi.fn(async (argv: string[]) => { throw new Error(`unexpected probe: ${argv.join(' ')}`) })
+    // Setup finishes for a deployment whose other Sources carry its work, with nothing for GitHub work to act on.
+    const deployment = await resolveDeployment(base, {}, spy, path)
+    expect(deployment).toEqual(base)
+    expect(deployment).not.toHaveProperty('repository')
+    expect(deployment).not.toHaveProperty('github')
+    expect(await resolveDeployment(base, { cli: 'gh' }, spy, path)).toEqual(base)
+    expect(spy).not.toHaveBeenCalled()
+  })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
       expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
     const repository = 'acme/widgets'
-    await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
     await needs('github', 'agentCliUnset', {}, { repository })
     await needs('github', 'agentCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { repository, cli: join(dir, 'missing') })
     await needs('github', 'agentCliMissing', { output: 'bin/gh must be a command name or an absolute path' }, { repository, cli: 'bin/gh' })

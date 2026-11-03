@@ -710,6 +710,7 @@ const TEXT = {
   'userError.ackNoChannel': ['确认需要一条已派给这个执行器、由人发出的原始消息。', USER_ERRORS.ackNoChannel[1]],
   'userError.ackNotPerson': ['请使用最初那条人发的触发，而不是机器人、CI 或执行器的报告。', USER_ERRORS.ackNotPerson[1]],
   'userError.notReady': ['工单还不能交付。进展只在内部保留，等待经过验证的就绪报告；不要把进展当作回答，也不要通过其他渠道发送。', USER_ERRORS.notReady[1]],
+  'userError.notFailed': ['失败通知只能发给停在开工前或工作中止的工单（person/failed）。', USER_ERRORS.notFailed[1]],
   'userError.notAttention': ['待人工决定的消息需要在 human_action 中写明工单当前待人工决定的问题。日常未完成的工作只在内部保留。', USER_ERRORS.notAttention[1]],
   'userError.notQuestion': ['回答必须针对最初由人提出的问题，而不是执行器报告或自动触发。', USER_ERRORS.notQuestion[1]],
   'userError.noAnswer': ['执行器还没有回答这条人发的触发。请等待执行器的报告，或用 orchestrator_ticket_request_status 请求一份（它只对处于等待状态的执行器起作用）；普通进展不能当作回答。', USER_ERRORS.noAnswer[1]],
@@ -745,6 +746,7 @@ const TEXT = {
   'healthCode.sourceOff': ['已关闭', HEALTH_TEXT.sourceOff],
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
+  'healthCode.githubRepositoryUnset': ['来源已打开，还没有设置监听的仓库', HEALTH_TEXT.githubRepositoryUnset],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT

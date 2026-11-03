@@ -858,7 +858,18 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   // git older than 2.32 ignores GIT_CONFIG_GLOBAL and reads the operator's configuration.
   answers = { ...valid, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
   await needs('deployment', 'gitTooOld', {})
-  await needs('github', 'repositoryUnset', {}, { github: { repository: '' } })
+  // A GitHub Source that names no repository no longer stops setup: the deployment runs its other Sources.
+  const githubless = await restart({}, { github: { repository: '' } })
+  await githubless.ready
+  expect(githubless.setupProblem).toBeUndefined()
+  expect(githubless.configured()).toBe(true)
+  expect(githubless.deployment.repository).toBeUndefined()
+  expect(githubless.deployment.github).toBeUndefined()
+  // The panel serves the deployment's state, and Triggers from the other Sources still reach the orchestrator.
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: null, accounts: { repository: null, agent: null } } })
+  const other = feishu('31', '@bot no repository needed')
+  await receive(other, githubless)
+  expect(githubless.store.triggers.get(other.id)).toBeDefined()
   // A broken Feishu bot leaves Feishu out and says why; GitHub work goes on.
   answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
   const next = await restart()

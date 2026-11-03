@@ -10,7 +10,7 @@ import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
+const absolute = (description: string) => s.string().pattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
@@ -50,12 +50,25 @@ export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
+/** The agent's GitHub identity, which `gh` acts as and which authors its commits. */
+export interface GithubAccount { cli: string; login: string; noreply: string }
 export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** The repository the GitHub Source watches, present once its settings name one. */
+  repository?: string
+  /** The GitHub account agents act as, present with the repository. */
+  github?: GithubAccount
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+
+/**
+ * The repository and account GitHub work needs, or undefined while the GitHub Source names no repository.
+ * A deployment whose other Sources carry its work has no GitHub account to act as and no repository to address.
+ */
+export function githubSetup(deployment: Pick<Deployment, 'repository' | 'github'>): { repository: string; github: GithubAccount } | undefined {
+  const { repository, github } = deployment
+  return repository && github ? { repository, github } : undefined
+}
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -88,7 +101,9 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
+  // The GitHub Source is optional: without a repository there is nothing to watch or probe, and the deployment's other
+  // Sources carry its work, so setup finishes instead of pausing the runtime for a check the operator cannot pass.
+  if (!remote) return { ...machine }
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }

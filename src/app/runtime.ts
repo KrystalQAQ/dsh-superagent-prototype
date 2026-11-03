@@ -13,6 +13,24 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
+
+/**
+ * Locks the state directory, waiting out a lock left behind by a killed process.
+ * @param stateDir - directory the runtime owns.
+ * @param compromised - called when another process takes over the lock.
+ * @returns the release function.
+ */
+function acquireStateLock(stateDir: string, compromised: (error: Error) => void): () => void {
+  const deadline = Date.now() + 40_000
+  for (;;) {
+    try {
+      return lockSync(stateDir, { stale: 10_000, onCompromised: compromised })
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('already being held') || Date.now() > deadline) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500)
+    }
+  }
+}
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
@@ -90,7 +108,8 @@ export class Runtime extends Service implements SourceHost {
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
     const compromised = (error: Error) => { this.runtimeHealth.set({ state: 'error', detail: error.message }); this.stopped.abort() }
-    const release = lockSync(machine.stateDir, { stale: 30_000, onCompromised: compromised })
+    // A Host killed without shutdown leaves the lock behind; the sync api rejects retries, so wait here until it goes stale.
+    const release = acquireStateLock(machine.stateDir, compromised)
     this.releaseLock = async () => { release() }
     let opened: Store | undefined
     try {
@@ -148,7 +167,9 @@ export class Runtime extends Service implements SourceHost {
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            // A deployment whose GitHub Source names no repository followed no PR and has no page to link, so there is nothing to notice.
+            const repository = setup.deployment.repository
+            if (repository) for (const message of pullEndNotices(ended, request, repository)) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -159,10 +180,13 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
-      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources, im: undefined,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
+      // `dshIm` is optional, and reading a service this plugin did not inject throws, so it is read in a child context that
+      // does inject it: the WeCom Source replies through DSH-IM where that plugin runs, and this one boots without it.
+      ctx.inject(['dshIm'], child => { this.toolHost.im = child.dshIm })
       this.ready = this.initialize()
     } catch (error) {
       // Release the database and state lock if initialization fails so an in-process restart can reacquire them.

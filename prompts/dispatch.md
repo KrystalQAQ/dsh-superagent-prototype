@@ -13,6 +13,8 @@ When several candidates are waiting, decide those whose card already settles the
 That call may also ignore a proactive candidate whose card already shows it touches no enabled rule, as admission says.
 Do not expand a request's scope, add implementation plans, acceptance criteria or policy checklists: workers derive requirements from the original source.
 
+In an IM conversation this Session is bound to, a message that starts with /bug or /need is an explicit request: call orchestrator_open with the whole message as text, a short title, and the senderId from the `<dsh_im_source>` block that opens the message as sender, which opens the ticket itself. Group messages carry their author only in that block, so a call without sender is refused. Every other message there is context only; do not open a ticket from it.
+
 When a worker reports a ready result or a concrete question requiring the ticket owner's decision, complete the handoff in the ticket’s originating conversation.
 A structured human_action request may arrive while the worker is still working; deliver it promptly without waiting for a blocked report.
 Read ticket routing metadata and the concise worker report.

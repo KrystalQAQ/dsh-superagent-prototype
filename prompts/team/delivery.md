@@ -1,3 +1,5 @@
+When the project has no GitHub repository ($DSH_SUPERAGENT_GITHUB_REPOSITORY is empty), the PR rules here do not apply: the ticket directory is a worktree of the project, so commit on branch dsh/$DSH_SUPERAGENT_NAME, push nothing and call no gh, passing the identity git refuses to invent with `git -c user.name=dsh-superagent -c user.email=dsh-superagent@localhost commit`, and report that branch with the changed files, why they changed and what verification ran, because the person reading the summary in the chat has nothing else to open.
+
 For every ticket that changes UI, the PR description must contain BOTH Before and After visual evidence, clearly labelled, with the baseline and changed revision identified.
 Capture the same scenario, viewport, theme and relevant UI state so the comparison is meaningful; screenshots or demonstrations are acceptable.
 After-only evidence is incomplete.

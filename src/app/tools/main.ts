@@ -2,9 +2,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople }
+import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForMainSession, type EngineForPeople, type Trigger }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
+import { SOURCE as WECOM, wecomChannel, wecomProject, wecomSettings, wecomTriggerId, type DshIm } from '../../sources/wecom.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
@@ -19,13 +20,16 @@ const RoutingNoteSchema = z.string().trim()
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
 export interface MainToolsHost {
   readonly context: Context
-  readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
+  readonly engine: Pick<EngineForMainSession, 'receive' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
   readonly assessor: Pick<MasterAssessor, 'context' | 'read' | 'decide'>
   readonly resources: ResourceHost
+  /** dsh-im's host service; undefined on a deployment without the WeCom transport, which leaves `/bug` messages unrouted. */
+  /** The DSH-IM service when that plugin runs; assigned once a child context that injects it is ready. */
+  im: DshIm | undefined
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
   sendReplies(): Promise<void>
@@ -151,6 +155,74 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
+/**
+ * `orchestrator_open`: a ticket from a `/bug` or `/need` message in the IM conversation this Session is bound to. dsh-im keeps
+ * inbound messages to itself, so the request arrives as a message of the Session rather than a Trigger of a Source; this tool
+ * supplies the Trigger that the WeCom Source would record, then accepts it.
+ */
+function openTool(host: MainToolsHost, agent: Agent): Tool {
+  return tool({
+    name: 'orchestrator_open',
+    description: 'Open a ticket from a /bug or /need message a person sent in the IM conversation this Session is bound to; use the whole message as text and a short title.',
+    schema: z.object({
+      kind: z.enum(['bug', 'need']).describe('bug: reported as broken. need: asked for.'),
+      title: z.string().min(1).max(200).describe('A short label of at most 200 characters for the original request; add no requirements or advice.'),
+      text: z.string().min(1).describe('The message as written, without summary, translation or added instructions.'),
+      sender: z.string().trim().min(1).max(128).nullish().describe('The senderId that the <dsh_im_source> block at the top of an IM message carries, copied exactly; needed when the conversation record has no author.'),
+      worktree_name: WorktreeNameSchema,
+      acknowledgement: AcknowledgementSchema,
+    }).strict(),
+    execute: async ({ kind, title, text, sender: stated, worktree_name, acknowledgement }) => {
+      const im = host.im
+      if (!im) return { refused: 'dsh-im is not installed, so this Session has no WeCom conversation to open a ticket from' }
+      const conversation = await im.describeConversation(agent.id).catch(() => null) ?? im.describeConversationSync?.(agent.id) ?? null
+      if (!conversation) return { refused: 'This Session is not bound to an IM conversation; open the ticket from a /bug or /need message in the group that mentions the bot' }
+      if (conversation.channel !== WECOM) return { refused: `This Session is bound to a ${conversation.channel} conversation, not WeCom; open the ticket from its own source` }
+      const chat = conversation.chatId
+      if (!chat) return { refused: 'dsh-im did not record a chat for this conversation, so a ticket reply would have nowhere to go' }
+      if (!conversation.botId) return { refused: 'dsh-im did not record the bot of this conversation, so a ticket reply has no sender' }
+      // A group message's author is not in the conversation record: dsh-im prefixes the message with a
+      // <dsh_im_source>{"senderId":"…"}</dsh_im_source> block instead, so the caller may state it.
+      const sender = conversation.senderId ?? (stated ?? '')
+      if (!sender) return { refused: 'A ticket needs the person whose message it came from; pass the senderId from the <dsh_im_source> block at the top of the message as sender' }
+      if (conversation.senderIsBot === true) return { refused: 'The message came from a bot; only a person\'s /bug or /need message opens a ticket' }
+      // A ticket's worktree needs a repository, and the Source's table is the only place that maps a chat to one, so an unbound
+      // group opens nothing and the refusal says which row to add instead of starting work with no directory.
+      const project = wecomProject(wecomSettings(host.context.orchestrator.sources), chat)
+      if (!project) return { refused: `这个群还没绑定项目。在 设置 → Sources → 企业微信 的『群与项目』里加一行：群 chatId = ${chat}，目录 = 你的 git 仓库绝对路径。` }
+      const trigger: Trigger = {
+        id: wecomTriggerId(chat, sender, kind, text),
+        source: WECOM,
+        threads: [{ source: WECOM, id: chat }],
+        actor: { source: WECOM, id: sender },
+        human: true,
+        addressed: 'direct',
+        at: new Date().toISOString(),
+        text,
+        channel: wecomChannel(conversation, chat),
+        meta: { bot: conversation.botId, target: chat, chat, chatId: chat, project: project.dir, branch: project.branch, chatType: conversation.chatType ?? '',
+          conversationKey: conversation.conversationKey,
+          ...(conversation.senderName ? { senderName: conversation.senderName } : {}), ...(conversation.chatTitle ? { chatTitle: conversation.chatTitle } : {}) },
+      }
+      const received = host.quietly(() => host.engine.receive(trigger))
+      if (received === 'duplicate') return { refused: 'This request was already opened; its ticket is in the ticket list' }
+      if (received === 'filtered') return { refused: 'The WeCom Source filtered this message; open the ticket from the conversation it came from' }
+      try {
+        const decision = host.quietly(() => host.engine.decide(trigger.id, { kind: 'accept', title, scope: title, reason: { code: 'explicitRouted' },
+          acknowledgement, name: worktree_name }))
+        if (decision.kind !== 'accept' || !decision.ticketId) {
+          // A refusal that a missing allow-list row caused names the sender, the only way to learn an id before one message is admitted.
+          const hint = decision.reason.some(item => item.code === 'notAdmissible') ? ` 把这个用户加进 设置 → Sources → 企业微信 的允许列表：id = ${sender}` : ''
+          return { refused: `Ticket was not created: ${reasonText(decision.reason)}${hint}` }
+        }
+        return routed(host, fromDecision(decision))
+      } catch (error) {
+        if (error instanceof UserError) return { refused: error.message }
+        throw error
+      }
+    },
+  })
+}
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
@@ -158,6 +230,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
     routeTool(host),
+    openTool(host, agent),
     tool({
       name: 'orchestrator_ticket_retry',
       description: 'Start a new assignment on an explicit human request to retry a ticket whose worker reported failed or blocked, or whose input was not delivered; the stalled one ends.',
@@ -222,11 +295,11 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     tool({
       name: 'orchestrator_reply',
-      description: `Send an answer to a human question, a ready result, or attention requiring human action, as the replies section says; the gate refuses anything else, such as progress. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. IM limit: ${IM_WORDS} words.`,
+      description: `Send an answer to a human question, a ready result, attention requiring human action, or the reason a ticket stopped before its work, as the replies section says; the gate refuses anything else, such as progress. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. purpose=failure needs a ticket in person/failed, and its text names what stopped the work and what a person can do about it. IM limit: ${IM_WORDS} words.`,
       schema: z.object({
         trigger_id: z.string().optional().describe('The original human question, for an answer only.'),
         ticket_id: z.string().optional(),
-        purpose: z.enum(['answer', 'result', 'attention']),
+        purpose: z.enum(['answer', 'result', 'attention', 'failure']),
         human_action: z.string().trim().min(1).optional().describe('Required for attention: the ticket\'s current attention question.'),
         text: z.string().min(1).max(20000),
       }).strict(),
